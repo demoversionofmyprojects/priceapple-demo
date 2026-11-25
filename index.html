@@ -89,7 +89,7 @@ h1,h2,h3{font-family:-apple-system,"SF Pro Display","Inter",system-ui,sans-serif
 .empty{grid-column:1/-1;text-align:center;color:var(--muted);padding:40px 0}
 
 /* ---------- product sheet ---------- */
-.sheet{position:fixed;inset:0;z-index:20;background:#fff;overflow-y:auto;view-transition-name:prod;overscroll-behavior:contain}
+.sheet{position:fixed;inset:0;z-index:20;transform-origin:0 0;background:#fff;overflow-y:auto;overscroll-behavior:contain}
 .sheet[hidden],.cart[hidden],.cartbar[hidden]{display:none}
 .gallery{display:flex;overflow-x:auto;scroll-snap-type:x mandatory;background:var(--soft);scrollbar-width:none;border-radius:0 0 32px 32px}
 .gallery::-webkit-scrollbar{display:none}
@@ -115,8 +115,6 @@ h1,h2,h3{font-family:-apple-system,"SF Pro Display","Inter",system-ui,sans-serif
 .bar .like{position:static;width:50px;height:50px;flex:none}
 .bar .like svg{width:22px;height:22px}
 .bar .btn-primary{flex:1;justify-content:center}
-::view-transition-group(prod){animation-duration:.5s;animation-timing-function:var(--ease)}
-::view-transition-old(prod),::view-transition-new(prod){height:100%;object-fit:cover;object-position:top}
 
 /* ---------- cart ---------- */
 .cartbar{position:fixed;left:16px;right:16px;bottom:calc(14px + env(safe-area-inset-bottom));z-index:10;height:56px;border-radius:28px;background:var(--ink);color:#fff;display:flex;align-items:center;justify-content:space-between;padding:0 22px;font-weight:600;box-shadow:0 14px 30px -12px rgba(0,0,0,.45);animation:rise .4s var(--ease)}
@@ -437,18 +435,46 @@ function fillSheet(p) {
   $('dLike').innerHTML = HEART; $('dLike').classList.toggle('on', likes.has(p.id));
   updateCartBtn();
 }
-const vt = fn => document.startViewTransition ? document.startViewTransition(fn) : (fn(), null);
+const EASE = 'cubic-bezier(.2,.8,.2,1)';
+const motion = () => matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 1;
+// Sheet shrunk into the card: gallery photo (square, top) lands exactly on the card photo.
+function cardFrame(card) {
+  const r = card.getBoundingClientRect(), k = r.width / innerWidth;
+  return { transform: `translate(${r.left}px, ${r.top}px) scale(${k})`,
+    clipPath: `inset(0px 0px ${Math.max(0, innerHeight - r.height / k)}px 0px round ${24 / k}px)` };
+}
+const FULL = { transform: 'translate(0px, 0px) scale(1)', clipPath: 'inset(0px 0px 0px 0px round 0px)' };
+const chrome = () => [$('sheet').querySelector('.sheet-body'), $('sheet').querySelector('.bar'), $('close')];
+let busy = false;
 
 function openSheet(id, card) {
+  if (busy) return;
   fillSheet(byId[id]); haptic('medium');
-  card.style.viewTransitionName = 'prod'; // card morphs into the full sheet
-  vt(() => { card.style.viewTransitionName = ''; $('sheet').hidden = false; $('sheet').scrollTop = 0; syncChrome(); });
+  const sheet = $('sheet');
+  sheet.hidden = false; sheet.scrollTop = 0; syncChrome();
+  busy = true;
+  sheet.animate([{ ...cardFrame(card), opacity: 0 }, { opacity: 1, offset: .15 }, { ...FULL, opacity: 1 }],
+    { duration: 520 * motion(), easing: EASE });
+  setTimeout(() => busy = false, 520 * motion()); // timer, not onfinish: paused animations (app in background) must not lock the UI
+  chrome().forEach((el, i) => el.animate([{ opacity: 0, transform: 'translateY(20px)' }, { opacity: 1, transform: 'none' }],
+    { duration: 380 * motion(), delay: (200 + i * 40) * motion(), easing: EASE, fill: 'backwards' }));
 }
 function closeSheet() {
-  const card = document.querySelector(`.card[data-id="${cur.id}"]`);
-  const t = vt(() => { $('sheet').hidden = true; if (card) card.style.viewTransitionName = 'prod'; syncChrome(); renderCardLike(); });
-  const clear = () => card && (card.style.viewTransitionName = '');
-  t ? t.finished.finally(clear) : clear();
+  if (busy) return;
+  const sheet = $('sheet'), card = document.querySelector(`.card[data-id="${cur.id}"]`);
+  const r = card?.getBoundingClientRect();
+  // shrink back only when the card is on screen and the photo is still at the top; otherwise just fade
+  const shrink = r && r.bottom > 0 && r.top < innerHeight && sheet.scrollTop < 40;
+  busy = true;
+  chrome().forEach(el => el.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 150 * motion(), fill: 'forwards' }));
+  const frames = shrink
+    ? [{ ...FULL, opacity: 1 }, { opacity: 1, offset: .8 }, { ...cardFrame(card), opacity: 0 }]
+    : [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'scale(.96)' }];
+  sheet.animate(frames, { duration: 420 * motion(), easing: 'cubic-bezier(.3,0,.2,1)', fill: 'forwards' });
+  setTimeout(() => {
+    sheet.hidden = true; busy = false; syncChrome(); renderCardLike();
+    sheet.getAnimations({ subtree: true }).forEach(a => a.cancel()); // drop the fill:'forwards' fades
+  }, 420 * motion());
 }
 function renderCardLike() {
   document.querySelectorAll('.card').forEach(c => c.querySelector('[data-like]').classList.toggle('on', likes.has(c.dataset.id)));

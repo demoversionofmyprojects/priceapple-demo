@@ -17,7 +17,7 @@
   --box-shadow:0 0 0 1px rgba(0,0,0,.055),0 1px 0 rgba(0,0,0,.04),0 2px 0 #f1f1f3,0 3px 0 rgba(0,0,0,.05),0 10px 18px -10px rgba(0,0,0,.22);
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html{scroll-behavior:smooth}
+html{scroll-behavior:smooth;scrollbar-gutter:stable} /* no page jump when the scroll lock hides the scrollbar */
 body{margin:0;background:var(--bg);color:var(--ink);font:400 15px/1.4 -apple-system,"SF Pro Text","Inter",system-ui,sans-serif;-webkit-font-smoothing:antialiased;overflow-x:hidden}
 body.lock{overflow:hidden}
 button{font:inherit;color:inherit;border:0;background:none;cursor:pointer;padding:0}
@@ -89,11 +89,13 @@ h1,h2,h3{font-family:-apple-system,"SF Pro Display","Inter",system-ui,sans-serif
 .empty{grid-column:1/-1;text-align:center;color:var(--muted);padding:40px 0}
 
 /* ---------- product sheet ---------- */
-.sheet{position:fixed;inset:0;z-index:20;transform-origin:0 0;background:#fff;overflow-y:auto;overscroll-behavior:contain}
+.sheet{position:fixed;inset:0;z-index:20;background:#fff;overflow-y:auto;overscroll-behavior:contain}
 .sheet[hidden],.cart[hidden],.cartbar[hidden]{display:none}
 .gallery{display:flex;overflow-x:auto;scroll-snap-type:x mandatory;background:var(--soft);scrollbar-width:none;border-radius:0 0 32px 32px}
 .gallery::-webkit-scrollbar{display:none}
 .gallery img{flex:none;width:100%;aspect-ratio:1;max-height:62svh;object-fit:contain;scroll-snap-align:center}
+.gallery.flying img{visibility:hidden}
+.ghost{position:fixed;z-index:25;object-fit:contain;transform-origin:0 0;pointer-events:none;will-change:transform}
 .dots{display:flex;justify-content:center;gap:6px;margin-top:-26px;position:relative;height:14px}
 .dots i{width:6px;height:6px;border-radius:3px;background:rgba(0,0,0,.2);transition:width .3s var(--ease),background .3s}
 .dots i.on{width:18px;background:var(--ink)}
@@ -111,7 +113,7 @@ h1,h2,h3{font-family:-apple-system,"SF Pro Display","Inter",system-ui,sans-serif
 .specs li{padding:14px 16px;display:flex;gap:10px;font-size:15px}
 .specs li+li{border-top:1px solid var(--line)}
 .specs li::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--ink);margin-top:8px;flex:none}
-.bar{position:fixed;left:0;right:0;bottom:0;z-index:3;display:flex;gap:10px;padding:12px 16px calc(12px + env(safe-area-inset-bottom));background:rgba(255,255,255,.86);backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);border-top:1px solid var(--line)}
+.bar{position:fixed;left:0;right:0;bottom:0;z-index:3;display:flex;gap:10px;padding:12px 16px calc(12px + env(safe-area-inset-bottom));background:rgba(255,255,255,.96);border-top:1px solid var(--line)}
 .bar .like{position:static;width:50px;height:50px;flex:none}
 .bar .like svg{width:22px;height:22px}
 .bar .btn-primary{flex:1;justify-content:center}
@@ -419,12 +421,17 @@ $('sort').addEventListener('change', renderGrid);
 document.querySelectorAll('[data-scroll]').forEach(b => b.onclick = () => $('catalog').scrollIntoView({ behavior: 'smooth' }));
 
 // ---------- product sheet ----------
-function fillSheet(p) {
-  cur = p;
-  const imgs = shotsFor(p);
+function fillGallery(p, imgs) {
   $('gal').innerHTML = imgs.map(s => `<img src="${s}" alt="${p.name}">`).join('');
   $('gal').scrollLeft = 0;
   $('dots').innerHTML = imgs.map((_, i) => `<i class="${i ? '' : 'on'}"></i>`).join('');
+}
+function fillSheet(p) {
+  cur = p;
+  // Rendering the extra angles blocks the main thread, so never do it during the open animation.
+  const ready = shots[p.id]?.length >= 4;
+  fillGallery(p, ready ? shots[p.id] : shotsFor(p, 1));
+  if (!ready) setTimeout(() => { if (cur === p && !$('sheet').hidden) fillGallery(p, shotsFor(p)); }, OPEN_MS + 80);
   $('dTag').textContent = p.tag; $('dName').textContent = p.name;
   $('dPrice').textContent = uah(p.price); $('dOld').textContent = uah(p.old);
   const variants = products.filter(v => v.group === p.group);
@@ -437,44 +444,62 @@ function fillSheet(p) {
 }
 const EASE = 'cubic-bezier(.2,.8,.2,1)';
 const motion = () => matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 1;
-// Sheet shrunk into the card: gallery photo (square, top) lands exactly on the card photo.
-function cardFrame(card) {
-  const r = card.getBoundingClientRect(), k = r.width / innerWidth;
-  return { transform: `translate(${r.left}px, ${r.top}px) scale(${k})`,
-    clipPath: `inset(0px 0px ${Math.max(0, innerHeight - r.height / k)}px 0px round ${24 / k}px)` };
-}
-const FULL = { transform: 'translate(0px, 0px) scale(1)', clipPath: 'inset(0px 0px 0px 0px round 0px)' };
+const OPEN_MS = 460, CLOSE_MS = 380;
 const chrome = () => [$('sheet').querySelector('.sheet-body'), $('sheet').querySelector('.bar'), $('close')];
 let busy = false;
 
+// Square box the product photo occupies inside an image element (photos are square, object-fit: contain).
+function photoBox(el) {
+  const r = el.getBoundingClientRect(), s = Math.min(r.width, r.height);
+  return { left: r.left + (r.width - s) / 2, top: r.top + (r.height - s) / 2, size: s };
+}
+// Shared-element flight: a copy of the photo moves between the card and the gallery.
+// Only transform is animated, so the GPU composites it without repainting the page.
+function flyPhoto(src, from, to, ms, radius) {
+  const g = document.createElement('img');
+  g.src = src; g.className = 'ghost'; g.style.borderRadius = radius;
+  Object.assign(g.style, { left: to.left + 'px', top: to.top + 'px', width: to.size + 'px', height: to.size + 'px' });
+  document.body.append(g);
+  g.animate([{ transform: `translate(${from.left - to.left}px, ${from.top - to.top}px) scale(${from.size / to.size})` }, { transform: 'none' }],
+    { duration: ms, easing: EASE, fill: 'forwards' });
+  setTimeout(() => g.remove(), ms + 40);
+}
+
 function openSheet(id, card) {
   if (busy) return;
-  fillSheet(byId[id]); haptic('medium');
-  const sheet = $('sheet');
-  sheet.hidden = false; sheet.scrollTop = 0; syncChrome();
   busy = true;
-  sheet.animate([{ ...cardFrame(card), opacity: 0 }, { opacity: 1, offset: .15 }, { ...FULL, opacity: 1 }],
-    { duration: 520 * motion(), easing: EASE });
-  setTimeout(() => busy = false, 520 * motion()); // timer, not onfinish: paused animations (app in background) must not lock the UI
-  chrome().forEach((el, i) => el.animate([{ opacity: 0, transform: 'translateY(20px)' }, { opacity: 1, transform: 'none' }],
-    { duration: 380 * motion(), delay: (200 + i * 40) * motion(), easing: EASE, fill: 'backwards' }));
+  const from = photoBox(card.querySelector('.card-img'));
+  fillSheet(byId[id]); haptic('medium');
+  const sheet = $('sheet'), gal = $('gal');
+  sheet.hidden = false; sheet.scrollTop = 0; syncChrome();
+  const ms = OPEN_MS * motion();
+  gal.classList.add('flying');
+  if (ms) flyPhoto(gal.firstElementChild.src, from, photoBox(gal.firstElementChild), ms, '0');
+  sheet.animate([{ opacity: 0 }, { opacity: 1 }], { duration: ms * .6, easing: 'ease-out' });
+  chrome().forEach((el, i) => el.animate([{ opacity: 0, transform: 'translateY(24px)' }, { opacity: 1, transform: 'none' }],
+    { duration: 380 * motion(), delay: (180 + i * 40) * motion(), easing: EASE, fill: 'backwards' }));
+  // timers, not onfinish: paused animations (app in background) must not lock the UI
+  setTimeout(() => { gal.classList.remove('flying'); busy = false; }, ms);
 }
 function closeSheet() {
   if (busy) return;
-  const sheet = $('sheet'), card = document.querySelector(`.card[data-id="${cur.id}"]`);
-  const r = card?.getBoundingClientRect();
-  // shrink back only when the card is on screen and the photo is still at the top; otherwise just fade
-  const shrink = r && r.bottom > 0 && r.top < innerHeight && sheet.scrollTop < 40;
   busy = true;
-  chrome().forEach(el => el.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 150 * motion(), fill: 'forwards' }));
-  const frames = shrink
-    ? [{ ...FULL, opacity: 1 }, { opacity: 1, offset: .8 }, { ...cardFrame(card), opacity: 0 }]
-    : [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'scale(.96)' }];
-  sheet.animate(frames, { duration: 420 * motion(), easing: 'cubic-bezier(.3,0,.2,1)', fill: 'forwards' });
+  const sheet = $('sheet'), gal = $('gal'), card = document.querySelector(`.card[data-id="${cur.id}"]`);
+  const shown = gal.children[Math.round(gal.scrollLeft / gal.clientWidth)] || gal.firstElementChild;
+  const ms = CLOSE_MS * motion();
+  const target = card && photoBox(card.querySelector('.card-img'));
+  // fly back only when both photos are on screen; otherwise just fade out
+  const fly = ms && target && target.top + target.size > 0 && target.top < innerHeight && shown.getBoundingClientRect().bottom > 0;
+  if (fly) {
+    const from = photoBox(shown);
+    gal.classList.add('flying');
+    flyPhoto(shown.src, from, target, ms, '24px 24px 0 0');
+  }
+  sheet.animate([{ opacity: 1 }, { opacity: 0 }], { duration: ms * (fly ? .7 : 1), easing: 'ease-in', fill: 'forwards' });
   setTimeout(() => {
-    sheet.hidden = true; busy = false; syncChrome(); renderCardLike();
-    sheet.getAnimations({ subtree: true }).forEach(a => a.cancel()); // drop the fill:'forwards' fades
-  }, 420 * motion());
+    sheet.hidden = true; busy = false; gal.classList.remove('flying'); syncChrome(); renderCardLike();
+    sheet.getAnimations().forEach(a => a.cancel()); // drop the fill:'forwards' fade
+  }, ms);
 }
 function renderCardLike() {
   document.querySelectorAll('.card').forEach(c => c.querySelector('[data-like]').classList.toggle('on', likes.has(c.dataset.id)));
@@ -534,7 +559,14 @@ tg?.BackButton?.onClick(() => !$('cart').hidden ? closeCart() : closeSheet());
 
 initHero();
 // let the hero paint first; card pictures are rendered right after
-setTimeout(() => { renderGrid(); updateCart(); }, 60);
+setTimeout(() => { renderGrid(); updateCart(); prerenderGalleries(); }, 60);
+// Gallery angles are drawn ahead of time, one product per idle slot, so opening a card never stalls.
+function prerenderGalleries() {
+  const idle = window.requestIdleCallback || (f => setTimeout(f, 150));
+  const queue = [...products];
+  const step = () => { const p = queue.shift(); if (!p) return; if (!busy) shotsFor(p); else queue.unshift(p); idle(step); };
+  idle(step);
+}
 </script>
 </body>
 </html>

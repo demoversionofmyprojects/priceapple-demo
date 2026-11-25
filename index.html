@@ -226,6 +226,8 @@ h1,h2,h3{font-family:-apple-system,"SF Pro Display","Inter",system-ui,sans-serif
 <script>
 const tg = window.Telegram?.WebApp;
 try { tg.ready(); tg.expand(); tg.setHeaderColor('#ffffff'); tg.setBackgroundColor('#ffffff'); } catch {}
+// scrolling the catalog must not drag/collapse the Telegram sheet (that resizes the viewport mid-scroll)
+try { tg.disableVerticalSwipes(); } catch {}
 const haptic = (t = 'light') => tg?.HapticFeedback?.impactOccurred(t);
 const $ = id => document.getElementById(id);
 const uah = n => n.toLocaleString('uk-UA') + ' ₴';
@@ -355,10 +357,14 @@ function initHero() {
     r.outputEncoding = THREE.sRGBEncoding; // GLB textures are sRGB
     $('credit').hidden = false;
   }, undefined, () => {});
-  const fit = () => { const { clientWidth: w, clientHeight: h } = canvas; r.setSize(w, h, false); cam.aspect = w / h; cam.position.z = Math.max(7.6, 7.6 / cam.aspect); cam.updateProjectionMatrix(); };
+  const fit = () => {
+    const { clientWidth: w, clientHeight: h } = canvas; if (!w || !h) return;
+    r.setSize(w, h, false); cam.aspect = w / h; cam.position.z = Math.max(7.6, 7.6 / cam.aspect); cam.updateProjectionMatrix();
+    r.render(scene, cam); // setSize wipes the canvas; redraw now, or it stays blank while the loop is paused
+  };
   new ResizeObserver(fit).observe(canvas);
   let spin = .5, drag = null, last = performance.now(), onScreen = true;
-  new IntersectionObserver(([e]) => onScreen = e.isIntersecting).observe(canvas);
+  new IntersectionObserver(([e]) => onScreen = e.isIntersecting, { rootMargin: '300px 0px' }).observe(canvas); // wake up before it scrolls into view
   canvas.addEventListener('pointerdown', e => { drag = e.clientX; canvas.setPointerCapture(e.pointerId); });
   canvas.addEventListener('pointermove', e => { if (drag === null) return; spin = (e.clientX - drag) * .25; drag = e.clientX; });
   canvas.addEventListener('pointerup', () => drag = null);
@@ -564,7 +570,13 @@ setTimeout(() => { renderGrid(); updateCart(); prerenderGalleries(); }, 60);
 function prerenderGalleries() {
   const idle = window.requestIdleCallback || (f => setTimeout(f, 150));
   const queue = [...products];
-  const step = () => { const p = queue.shift(); if (!p) return; if (!busy) shotsFor(p); else queue.unshift(p); idle(step); };
+  const step = () => {
+    const p = queue.shift();
+    // all done: free the second WebGL context so mobile GPUs don't drop the hero one
+    if (!p) { shotR?.dispose(); shotR?.forceContextLoss(); shotR = null; return; }
+    if (!busy) shotsFor(p); else queue.unshift(p);
+    idle(step);
+  };
   idle(step);
 }
 </script>

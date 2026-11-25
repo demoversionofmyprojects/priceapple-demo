@@ -351,16 +351,14 @@ function initHero() {
   // Empty holder until the real model arrives; the canvas stays transparent meanwhile (no placeholder flash).
   const scene = makeScene(), model = new THREE.Group(); scene.add(model);
   const show = obj => { model.add(obj); r.render(scene, cam); canvas.classList.add('ready'); };
-  const fallback = () => show(makeMax(products[0].model)); // only if the file can't be loaded
-  if (!THREE.GLTFLoader) fallback();
-  else new THREE.GLTFLoader().load('models/airpods-max-2.glb', gltf => {
+  THREE.GLTFLoader?.prototype && new THREE.GLTFLoader().load('models/airpods-max-2.glb', gltf => {
     const m = gltf.scene, box = new THREE.Box3().setFromObject(m), size = box.getSize(new THREE.Vector3());
     m.position.sub(box.getCenter(new THREE.Vector3()));
     const holder = new THREE.Group(); holder.add(m); holder.scale.setScalar(2.9 / Math.max(size.x, size.y, size.z));
     r.outputEncoding = THREE.sRGBEncoding; // GLB textures are sRGB
     show(holder);
     $('credit').hidden = false;
-  }, undefined, fallback);
+  });
   const fit = () => {
     const { clientWidth: w, clientHeight: h } = canvas; if (!w || !h) return;
     r.setSize(w, h, false); cam.aspect = w / h; cam.position.z = Math.max(7.6, 7.6 / cam.aspect); cam.updateProjectionMatrix();
